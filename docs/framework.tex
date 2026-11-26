@@ -1,0 +1,162 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=16mm,top=14mm,bottom=14mm]{geometry}
+\usepackage[T1]{fontenc}
+\IfFileExists{newtxtext.sty}{\usepackage{newtxtext,newtxmath}}{\usepackage{mathptmx}}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,tabularx,array}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\titleformat{\section}{\normalfont\fontsize{11}{12}\bfseries}{\thesection}{0.5em}{}
+\titleformat{\subsection}{\normalfont\fontsize{10}{11}\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{8pt}{3pt}
+\titlespacing*{\subsection}{0pt}{6pt}{2pt}
+\usepackage{hyperref}
+\hypersetup{hidelinks}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\pagestyle{fancy}\fancyhf{}\fancyfoot[C]{\footnotesize\thepage}\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\arraystretch}{1.15}
+\setlist{nosep,leftmargin=14pt}
+\newcommand{\GI}{\mathcal G_{\mathrm I}}
+\newcommand{\GR}{\mathcal G_{\mathrm R}}
+\newcommand{\uu}{\mathbf u}
+\newcommand{\nn}{\mathbf n}
+\newcommand{\cc}{\mathbf c}
+\newcommand{\bmu}{\boldsymbol\mu}
+\newcommand{\bom}{\boldsymbol\omega}
+\newcommand{\bka}{\boldsymbol\kappa}
+\newcommand{\Ib}{I^{\mathrm{base}}}
+
+\begin{document}
+\begin{center}
+{\Large\bfseries ExODE-GS with Causal Autoregressive Refinement}\\[2pt]
+{\large for Motion Interpolation in Dynamic Scenes Seen Through Glass}\\[2pt]
+{\footnotesize Technical framework: model, training and inference. 25 November 2026}
+\end{center}
+\vspace{-1mm}\hrule\vspace{2mm}
+
+\textbf{In brief.} A dynamic scene behind and in front of a planar pane of glass is represented by two Gaussian fields: an interface field $\GI$ of 2D Gaussian disks for what is seen \emph{through} the glass, and a reflection field $\GR$ of 3D Gaussians for what is seen \emph{in} it. Every Gaussian of both fields moves with \textbf{ExODE-GS}, a closed-form ordinary differential equation with four explicit per-Gaussian parameters. The two renders are blended with a Fresnel weight, and a small \textbf{causal autoregressive CNN} then corrects the blended image of frame $t$ using its own refined outputs of the $K$ previous frames. Training has three separate stages (Phase~I, Phase~II, refinement); each freezes everything trained before it.
+
+\begin{figure}[h]
+\centering\includegraphics[width=\textwidth]{../report/graphics/exode_pipeline.png}
+\caption{Training (Phase~I, Phase~II) and inference with the causal autoregressive refinement.}
+\end{figure}
+
+\section{Inputs and representation}
+For each frame $t$ of a sequence: the original image $I_t$, a reflection-removed image $I_t^{\mathrm{clean}}$ (DAI, applied inside the glass mask only), a glass mask $M_t$, a calibrated camera $C_t$ (world-to-camera $W_t$, center $\cc_t$) and a timestamp $\tau_t\in[0,1]$. Frames are split in groups of five consecutive frames: frames 1, 2, 4, 5 train, frame 3 tests. Test frames therefore lie between training frames in time and in camera pose (\emph{motion interpolation}).
+
+The canonical fields are
+\begin{equation}
+\GI^0=\{(\bmu_i,q_i,\mathbf s_i^{(2)},p_i,o_i,\mathbf a_i,\Theta_i)\}_{i=1}^{N_{\mathrm I}},\qquad
+\GR^0=\{(\bmu_j,q_j,\mathbf s_j^{(3)},o_j,\mathbf a_j,\Theta_j)\}_{j=1}^{N_{\mathrm R}},
+\end{equation}
+with center $\bmu$, unit quaternion $q$, scales $\mathbf s$ (two for a disk, three for an ellipsoid), opacity $o$, spherical-harmonic colour $\mathbf a$ and, for the interface only, occupancy $p$. The interface renders with the effective opacity $p_io_i$: a glass disk can keep a high occupancy $p$ (a surface is present) and a low opacity $o$ (it transmits light). $\Theta=\{\mathbf A,\mathbf b,\bom,\bka\}$ are the ExODE-GS motion parameters. Occupancy, opacity and colour do not change with time.
+
+\section{ExODE-GS: explicit ODE-guided motion}
+Each Gaussian follows its own continuous-time dynamics, in closed form (no ODE solver, no neural network):
+\begin{align}
+\text{center:}\quad & \frac{d(\bmu(\tau)-\bmu^0)}{d\tau}=\mathbf A\,(\bmu(\tau)-\bmu^0)+\mathbf b,\quad \bmu(0)=\bmu^0,
+&& \exp\!\Big(\tau\begin{bmatrix}\mathbf A&\mathbf b\\\mathbf 0^\top&0\end{bmatrix}\Big)=\begin{bmatrix}\mathbf M(\tau)&\mathbf q(\tau)\\\mathbf 0^\top&1\end{bmatrix},
+\quad \bmu(\tau)=\bmu^0+\mathbf q(\tau), \label{eq:center}\\
+\text{rotation:}\quad & \mathbf R(\tau)=\exp([\bom]_\times\tau)\,\mathbf R^0, && [\bom]_\times=\begin{bmatrix}0&-\omega_z&\omega_y\\\omega_z&0&-\omega_x\\-\omega_y&\omega_x&0\end{bmatrix}, \label{eq:rotation}\\
+\text{scale:}\quad & \mathbf s(\tau)=\mathbf s^0\odot\exp(\bka\,\tau), && \bka\in\mathbb R^2\ (\GI),\ \bka\in\mathbb R^3\ (\GR). \label{eq:scale}
+\end{align}
+$\mathbf b$ is a drift velocity, $\mathbf A$ bends the trajectory (acceleration, deceleration, curving), $\bom$ is an angular velocity, $\bka$ the growth rate of each scale axis. The center ODE is written in each Gaussian's own frame, whose origin is its canonical center, so $\mathbf M(\tau)$ multiplies $\bmu(0)-\bmu^0=\mathbf 0$ and only $\mathbf q(\tau)$ remains; written this way, the motion does not depend on where the world origin is. The augmented matrix exponential is exact for singular $\mathbf A$, where $\mathbf A^{-1}(e^{\mathbf A\tau}-\mathbf I)\mathbf b$ cannot be used. $\mathbf R(\tau)$ is a rotation for every $\bom$, and $\mathbf s(\tau)>0$ for every $\bka$. The moved field at time $\tau$ is written $\GI(\tau)$, $\GR(\tau)$; $\Sigma(\tau)=\mathbf R(\tau)\operatorname{diag}(\mathbf s(\tau)^2)\mathbf R(\tau)^\top$.
+
+Motion regularizers, averaged over the $N$ Gaussians of a field ($E$: scene extent, the radius of the camera cluster):
+\begin{equation}
+\mathcal L_{\mathrm{ode}}=\frac1N\sum_i \lambda_A\|\mathbf A_i\|_F^2+\lambda_b\|\mathbf b_i/E\|_2^2+\lambda_\omega\|\bom_i\|_2^2+\lambda_\kappa\|\bka_i\|_2^2,\qquad
+\mathcal L_{\mathrm{scale}}=\frac1N\sum_i \max\!\big(0,\ \|\log(\mathbf s_i(\tau)/E)\|_\infty-s_{\max}\big)^2. \label{eq:reg}
+\end{equation}
+$\mathcal L_{\mathrm{ode}}$ keeps Gaussians that do not need to move at rest; $\mathcal L_{\mathrm{scale}}$ stops scales from exploding or vanishing.
+
+\section{Phase I: interface reconstruction}
+$\GI$ is rendered through the real camera with the 2DGS rasterizer, twice:
+\begin{equation}
+B_t=\mathcal R_{2D}\big(\GI(\tau_t),C_t;\ p\,o\big),\qquad \big(A^s_t,D^s_t,N^s_t,O^s_t\big)=\mathcal R_{2D}\big(\GI(\tau_t),C_t;\ p\big),\qquad g_t=\operatorname{clip}_{[0,1]}(1-O^s_t).
+\end{equation}
+The first pass gives the direct image $B_t$; the second (occupancy only) gives the first surface: coverage, depth, normal, and the composited opacity $O^s_t$, from which the glass map $g_t$ is high where a surface is present but transparent. With $\mathcal L_{\mathrm{rgb}}(X,Y)=(1-\lambda_{\mathrm{ssim}})\|X-Y\|_1+\lambda_{\mathrm{ssim}}(1-\mathrm{SSIM}(X,Y))$:
+\begin{equation}
+\mathcal L_{\mathrm I}=\mathcal L_{\mathrm{rgb}}(B_t,I_t^{\mathrm{clean}})+\lambda_s\mathcal L_{\mathrm{surf}}+\lambda_g\,\mathrm{BCE}(g_t,M_t)+\frac{\lambda_p}{|\mathcal V_t|}\sum_{i\in\mathcal V_t}p_i+\mathcal L_{\mathrm{ode}}+\lambda_{\mathrm{scale}}\mathcal L_{\mathrm{scale}},
+\end{equation}
+optimized over $\GI^0$ and $\Theta_{\mathrm I}$. $\mathcal L_{\mathrm{surf}}$ aligns the rendered normals with the normals of the rendered depth. The first 3000 iterations train the canonical field alone (static warm-up); motion is switched on afterwards.
+
+\section{Glass plane and virtual camera}
+One planar pane $\Pi=\{\mathbf x:\nn^\top\mathbf x+d=0\}$, $\|\nn\|=1$, cameras on the positive side, is fitted after Phase~I: median-depth surface points of the frozen $\GI$ inside $M_t$ (where $g_t>0.5$ and the coverage is above 0.5) are pooled over the training views; RANSAC (2000 triplets, inlier distance 1\% of $E$) and three rounds of SVD refinement give $(\nn,d)$. The glass is static. The reflection across $\Pi$ and the virtual camera are
+\begin{equation}
+\mathbf H_\Pi=\begin{bmatrix}\mathbf I_3-2\nn\nn^\top&-2d\,\nn\\\mathbf 0^\top&1\end{bmatrix},\qquad W_t^{v}=W_t\,\mathbf H_\Pi,\qquad \cc_t^{v}=\cc_t-2(\nn^\top\cc_t+d)\,\nn,
+\end{equation}
+with the intrinsics and the timestamp of $C_t$. Projecting a point through $W_t^v$ equals projecting its mirror image through the real camera, so the reflection render lines up with $B_t$ pixel for pixel; $\GR$ stays in real world coordinates, on the camera side of the glass.
+
+\section{Phase II: reflection reconstruction and composition}
+$\GI$, $\Theta_{\mathrm I}$ and $\Pi$ are frozen ($B_t$ and $g_t$ are rendered once per training view). $\GR$ is initialised with 100{,}000 random points on the camera side of the glass and rendered through the virtual camera:
+\begin{equation}
+R_t=\mathcal R_{3D}\big(\GR(\tau_t),C_t^v\big),\qquad
+F(\theta)=F_0+(1-F_0)(1-\cos\theta)^5,\qquad \alpha_t(\uu)=g_t(\uu)\,\operatorname{clip}_{[0,1]}\big(F(\theta_t(\uu))+h_\psi(\uu,t)\big),
+\end{equation}
+\begin{equation}
+\Ib_t(\uu)=\big(1-\alpha_t(\uu)\big)B_t(\uu)+\alpha_t(\uu)R_t(\uu),\qquad
+\mathcal L_{\mathrm R}=\mathcal L_{\mathrm{rgb}}(\Ib_t,I_t)+\mathcal L_{\mathrm{ode}}+\lambda_{\mathrm{scale}}\mathcal L_{\mathrm{scale}}+\lambda_o\tfrac1{|\Omega|}\textstyle\sum_\uu h_\psi^2,
+\end{equation}
+optimized over $\GR^0$, $\Theta_{\mathrm R}$, $F_0$ and (optionally) $h_\psi$. $\cos\theta_t(\uu)=|\nn^\top\mathbf r_t(\uu)|$ for the unit ray $\mathbf r_t(\uu)$ of pixel $\uu$. $F_0=\sigma(\phi)$ is one learnable scalar per scene, initialised at $((\eta_g-\eta_a)/(\eta_g+\eta_a))^2=0.04$ ($\eta_a=1$, $\eta_g=1.5$): Schlick's angular dependence is kept, and the strength can adapt to the pane (two surfaces, coatings, dirt). The glass map $g_t$ confines the reflection to the glass. Composition is in linear RGB.
+
+\section{Causal autoregressive refinement}
+After Phase~II, the whole reconstruction is frozen. All frames of the sequence (training and test cameras) are ordered by time and base-rendered, $\Ib_t$, in display sRGB. The refiner $f_\theta$ visits them in that order:
+\begin{equation}
+\hat I_t=\Ib_t+f_\theta\Big(\Ib_t,\ \big\{\mathcal W_{t\leftarrow t-k}(\hat I_{t-k}),\,V_{t,k}\big\}_{k=1}^{K}\Big),\qquad K=3. \label{eq:refine}
+\end{equation}
+\textbf{Motion alignment.} $\mathcal W_{t\leftarrow t-k}$ moves a past refined frame to frame $t$ along the optical flow between \emph{base renders} (never ground truth), estimated by the pretrained RAFT-small: $\mathcal W_{t\leftarrow t-k}(X)(\mathbf x)=X(\mathbf x+F_{t\to t-k}(\mathbf x))$ (bilinear). $V_{t,k}\in\{0,1\}$ keeps the pixels that pass the forward-backward check $|F_{t\to t-k}+F_{t-k\to t}(\mathbf x+F_{t\to t-k})|^2\le 0.01(|F_{t\to t-k}|^2+|F_{t-k\to t}|^2)+0.5$ and land inside the image; a frame before the start of the sequence enters as zeros with $V=0$. Flows depend only on the frozen renders and are computed once.
+
+\textbf{Network.} A three-level U-Net (32/64/128 channels, two $3\times3$ convolutions per level, LeakyReLU, skip connections) on the $3+4K$ input channels, predicting an RGB residual. Its last layer starts at zero, so the untrained refiner returns $\Ib_t$ unchanged.
+
+\textbf{Causality.} $\hat I_t$ depends on $\Ib_t$ and on $\hat I_{t-1},\dots,\hat I_{t-K}$ only, and these on earlier frames only: no future frame, and no ground truth of any frame, enters the computation at inference.
+
+\textbf{Training (separate stage).} Only $\theta$ is trained, on the training frames only: each step refines a clip of 4 consecutive frames in time order, each frame receiving its own previous outputs (backpropagation through the clip), with
+\begin{equation}
+\mathcal L_{\mathrm{AR}}=\frac{1}{|\mathcal T_{\mathrm{clip}}|}\sum_{t\in\mathcal T_{\mathrm{clip}}\cap\mathcal T_{\mathrm{train}}}\mathcal L_{\mathrm{rgb}}(\hat I_t,I_t).
+\end{equation}
+The history before a clip comes from a bank holding the latest refined output of every frame (initialised with the base renders), so the refiner learns from inputs of its own, as at inference. Test frames can be part of a clip (they are refined and become history) but never receive a loss.
+
+\section{Training stages and inference}
+\begin{tabularx}{\textwidth}{@{}lXl@{}}
+\toprule
+Stage & Trained (everything else frozen) & Loss \\ \midrule
+Phase I & $\GI^0$, $\Theta_{\mathrm I}$ & $\mathcal L_{\mathrm I}$ against $I_t^{\mathrm{clean}}$ \\
+Glass plane & $(\nn,d)$ by RANSAC + SVD on the frozen $\GI$ & --- \\
+Phase II & $\GR^0$, $\Theta_{\mathrm R}$, $F_0$, ($h_\psi$) & $\mathcal L_{\mathrm R}$ against $I_t$ \\
+Refinement & $\theta$ & $\mathcal L_{\mathrm{AR}}$ against $I_t$, training frames \\ \bottomrule
+\end{tabularx}
+
+\textbf{Inference} at time $\tau$ and camera $C$: $\GI(\tau)$, $\GR(\tau)$ by Eqs.~(\ref{eq:center})--(\ref{eq:scale}); $B$, $g$ from the real camera, $R$ from the virtual camera; $\Ib$ by the blend; $\hat I$ by Eq.~(\ref{eq:refine}) over the sequence in time order.
+
+\section{Ablations}
+All variants keep the mirrored virtual camera and the single glass plane; only the motion model and the refinement change.
+
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+No ExODE-GS in $\GI$ & $\Theta_{\mathrm I}$ removed: $\GI$ is static (all stages retrained). \\
+No ExODE-GS in $\GR$ & $\Theta_{\mathrm R}$ removed: $\GR$ is static (Phase~I and the plane reused from the full model). \\
+No ExODE-GS in either field & $\Theta_{\mathrm I}$ and $\Theta_{\mathrm R}$ removed: a static reconstruction, refined as usual. \\
+No autoregressive refinement & $\hat I_t=\Ib_t$ (the full model's composites). \\ \bottomrule
+\end{tabularx}
+
+\section{Implementation choices that keep the formulation}
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+Matrix exponential & \texttt{torch.linalg.matrix\_exp} on the $4\times4$ augmented matrices, in chunks of $10^5$ Gaussians (bounded memory). \\
+Rotation & $\exp([\bom]_\times\tau)$ in closed form as a unit quaternion $(\cos\frac{|\bom|\tau}2,\ \sin\frac{|\bom|\tau}2\,\bom/|\bom|)$, composed with $q^0$ by a quaternion product; a Taylor series near $\bom=0$ keeps the gradient finite. \\
+Initial motion & $\Theta=0$: every Gaussian starts at rest; motion is enabled after the static warm-up. \\
+Densification & $\Theta$ is a per-Gaussian parameter like the others: a cloned or split Gaussian inherits its parent's motion, pruning removes it. \\
+Learning rates & $\mathbf A$: $10^{-5}$, $\mathbf b$: $10^{-4}E$, $\bom$: $10^{-4}$, $\bka$: $5\cdot10^{-4}$ (ExODE-GS paper; $\mathbf b$ scaled by the extent), decaying exponentially to 10\% over the phase. \\
+Regularizer weights & $\lambda_A=\lambda_b=\lambda_\omega=\lambda_\kappa=10^{-3}$, $\lambda_{\mathrm{scale}}=1$, $s_{\max}=10$. \\
+Time jitter & During training, $\tau_t$ is perturbed by $\mathcal N(0,(0.1/N_{\mathrm{train}})^2)$, annealed to zero at 2/3 of the phase: smooth trajectories between training timestamps. \\
+Short schedules & A run with fewer iterations scales every iteration-based schedule (warm-up, densification, resets, decays) by the same factor. \\ \bottomrule
+\end{tabularx}
+
+\section{Sources}
+\small
+3DGS: Kerbl et al., SIGGRAPH 2023. 2DGS: Huang et al., SIGGRAPH 2024. Occupancy--opacity factorization: RT-Splatting, Shi et al., 2026. ExODE-GS: the authors' explicit ODE-guided motion model (augmented matrix exponential, exponential map, exponential scale rate, $\mathcal L_{\mathrm{ode}}$, $\mathcal L_{\mathrm{scale}}$). Planar mirror geometry: Hartley and Zisserman, \emph{Multiple View Geometry}. Fresnel: Schlick, CGF 1994. Reflection removal: DAI, Hu et al., 2025. Optical flow: RAFT, Teed and Deng, ECCV 2020; forward-backward check: Sundaram et al., ECCV 2010. Recurrent flow-aligned refinement: BasicVSR, Chan et al., CVPR 2021 (its forward, causal branch). U-Net: Ronneberger et al., MICCAI 2015.
+\end{document}
