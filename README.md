@@ -23,12 +23,6 @@ cases) and renders them at new viewpoints and times. It separates the scene **be
 | Optional experiment | `train_joint.py` (joint fine-tuning of the reconstruction and the refiner) |
 | Tests | `tests/` |
 
-`train.py`, `render.py`, `eval.sh`, `scene/gaussian_model.py` and `gaussian_renderer/__init__.py` are the
-[RT-Splatting](https://sjj118.github.io/RT-Splatting) (CVPR 2026) baseline this repository started from, kept unchanged for comparison.
-
-> Some files and functions still carry the name `vigor` (for example `render_vigor.py`). It is the project's earlier
-> name; the code implements ExODE-GS.
-
 ## Installation
 
 Requirements: Linux, an NVIDIA GPU, CUDA 11.8, Python 3.10.
