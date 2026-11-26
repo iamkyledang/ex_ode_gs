@@ -4,41 +4,7 @@ ExODE-GS reconstructs dynamic scenes seen through a planar glass surface (shop w
 cases) and renders them at new viewpoints and times. It separates the scene **behind** the glass from the
 **reflection** on it, lets each move on its own, and refines the result frame by frame without looking at the future.
 
-Specialized project (DACN), semester 261, Faculty of Computer Science and Engineering, Ho Chi Minh City University of
-Technology (HCMUT).
-
 ![ExODE-GS pipeline](assets/pipeline.png)
-
-## How it works
-
-The method has three stages, trained one after another.
-
-| Stage | What is learned | Supervision |
-|---|---|---|
-| **Phase I: interface field** `G_I` | 2D Gaussian disks for the first visible surface and the scene behind the glass. Each disk has an occupancy `p` (is a surface here?) and an opacity `o` (does it block light?), so glass can be a surface that still transmits. The glass plane is then fitted to this field. | Reflection-removed images `I_t^clean` (from Dereflection Any Image, DAI) and glass masks |
-| **Phase II: reflection field** `G_R` | 3D Gaussians for the reflected scene, kept in world coordinates and rendered through a virtual camera mirrored across the glass plane. `G_I` is frozen. | Original images `I_t` |
-| **Causal autoregressive refinement** `f_θ` | A small residual U-Net that corrects each frame from its composite and the `K` previously refined frames, warped to it with RAFT optical flow. The reconstruction is frozen. | Original images of the training frames |
-
-The two renders are blended with a Fresnel–Schlick weight:
-
-```
-I_t^base = (1 − α_t) B_t + α_t R_t,      α_t = g_t · F(θ_t; F0)       (F0 learned per scene, starts at 0.04)
-Î_t      = I_t^base + f_θ(I_t^base, Î_{t−1}, …, Î_{t−K})              (final output)
-```
-
-where `B_t` is the direct image, `R_t` the reflection image, `g_t` the predicted glass map and `θ_t` the viewing angle.
-
-**ExODE-GS motion.** Both fields move with explicit, per-Gaussian ODEs instead of a deformation network. Every
-Gaussian carries motion parameters `Θ = {A, b, ω, κ}` with closed-form solutions:
-
-| | Model |
-|---|---|
-| Center | `dμ/dτ = A(μ − μ⁰) + b`, solved with the matrix exponential of `[[A, b], [0, 0]]` |
-| Rotation | `R(τ) = exp([ω]ₓ τ) R⁰` |
-| Scale | `s(τ) = s⁰ ⊙ exp(κ τ)` |
-
-The full derivation, losses and design choices are in [docs/framework.pdf](docs/framework.pdf)
-(source: [docs/framework.tex](docs/framework.tex)).
 
 ## Repository layout
 
